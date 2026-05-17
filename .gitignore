@@ -1,0 +1,9 @@
+.DS_Store
+.venv/
+.venv39/
+__pycache__/
+*.py[cod]
+dedsec_outputs/
+test_*_dedsec.jpg
+*.log
+
