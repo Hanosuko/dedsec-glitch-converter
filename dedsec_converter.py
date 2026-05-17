@@ -794,43 +794,67 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
             <option value=".mkv">MKV</option>
             <option value=".webm">WEBM</option>
         """
-        progress_block = """
-    <section id="render_progress" class="result progress-panel" hidden>
-      <div class="status" id="render_status">RENDER 0%</div>
-      <progress id="render_bar" value="0" max="100"></progress>
-      <div class="hint" id="render_hint">Идет обработка видео...</div>
+        image_progress_block = """
+    <section id="image_render_progress" class="result progress-panel" hidden>
+      <div class="status" id="image_render_status">RENDER 0%</div>
+      <progress id="image_render_bar" value="0" max="100"></progress>
+      <div class="hint" id="image_render_hint">Идет обработка фото...</div>
     </section>
-    <section id="async_result"></section>
+    <section id="image_async_result"></section>
+        """
+        video_progress_block = """
+    <section id="video_render_progress" class="result progress-panel" hidden>
+      <div class="status" id="video_render_status">RENDER 0%</div>
+      <progress id="video_render_bar" value="0" max="100"></progress>
+      <div class="hint" id="video_render_hint">Идет обработка видео...</div>
+    </section>
+    <section id="video_async_result"></section>
         """
         script_block = """
   <script>
-    const form = document.getElementById("video_form");
-    const panel = document.getElementById("render_progress");
-    const bar = document.getElementById("render_bar");
-    const statusText = document.getElementById("render_status");
-    const hint = document.getElementById("render_hint");
-    const asyncResult = document.getElementById("async_result");
-    const button = form.querySelector("button[type=submit]");
+    // Image form handler
+    const imageForm = document.getElementById("image_form");
+    const imagePanel = document.getElementById("image_render_progress");
+    const imageBar = document.getElementById("image_render_bar");
+    const imageStatusText = document.getElementById("image_render_status");
+    const imageHint = document.getElementById("image_render_hint");
+    const imageAsyncResult = document.getElementById("image_async_result");
+    const imageButton = imageForm.querySelector("button[type=submit]");
 
-    function setProgress(value, status) {
+    // Video form handler
+    const videoForm = document.getElementById("video_form");
+    const videoPanel = document.getElementById("video_render_progress");
+    const videoBar = document.getElementById("video_render_bar");
+    const videoStatusText = document.getElementById("video_render_status");
+    const videoHint = document.getElementById("video_render_hint");
+    const videoAsyncResult = document.getElementById("video_async_result");
+    const videoButton = videoForm.querySelector("button[type=submit]");
+
+    function setProgress(panel, bar, statusText, hint, value, status) {
       const pct = Math.max(0, Math.min(100, Number(value) || 0));
       panel.hidden = false;
       bar.value = pct;
       statusText.textContent = `${status || "RENDER"} ${pct.toFixed(1)}%`;
     }
 
-    function showResult(data) {
+    function showResult(asyncResult, data, isVideo) {
       const url = `/file?path=${encodeURIComponent(data.result)}`;
+      let preview = '';
+      if (isVideo) {
+        preview = `<video class="preview" src="${url}" controls></video>`;
+      } else {
+        preview = `<img class="preview" src="${url}" alt="preview">`;
+      }
       asyncResult.innerHTML = `
         <section class="result ok">
           <div class="status">DONE</div>
           <a href="${url}" target="_blank">${data.result}</a>
-          <video class="preview" src="${url}" controls></video>
+          ${preview}
         </section>
       `;
     }
 
-    function showError(message) {
+    function showError(asyncResult, message) {
       asyncResult.innerHTML = `
         <section class="result error">
           <div class="status">ERROR</div>
@@ -839,76 +863,80 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
       `;
     }
 
-    async function pollJob(id) {
+    async function pollJob(id, panel, bar, statusText, hint, asyncResult, button, isVideo) {
       const response = await fetch(`/progress?id=${encodeURIComponent(id)}`);
       const data = await response.json();
-      setProgress(data.progress, data.status);
+      setProgress(panel, bar, statusText, hint, data.progress, data.status);
       if (data.status === "done") {
-        setProgress(100, "DONE");
+        setProgress(panel, bar, statusText, hint, 100, "DONE");
         hint.textContent = "Рендер завершен.";
         button.disabled = false;
-        showResult(data);
+        showResult(asyncResult, data, isVideo);
         return;
       }
       if (data.status === "error") {
         hint.textContent = "Рендер остановлен.";
         button.disabled = false;
-        showError(data.error || "Unknown error");
+        showError(asyncResult, data.error || "Unknown error");
         return;
       }
-      setTimeout(() => pollJob(id), 500);
+      setTimeout(() => pollJob(id, panel, bar, statusText, hint, asyncResult, button, isVideo), 500);
     }
 
-    form.addEventListener("submit", async (event) => {
+    // Image form submit handler
+    imageForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      button.disabled = true;
-      asyncResult.innerHTML = "";
-      hint.textContent = "Файл отправлен, начинаю рендер...";
-      setProgress(0, "QUEUE");
+      imageButton.disabled = true;
+      imageAsyncResult.innerHTML = "";
+      imageHint.textContent = "Файл отправлен, начинаю рендер...";
+      setProgress(imagePanel, imageBar, imageStatusText, imageHint, 0, "QUEUE");
       try {
-        const response = await fetch("/convert-video/start", {
+        const response = await fetch("/convert", {
           method: "POST",
-          body: new FormData(form)
+          body: new FormData(imageForm)
         });
         const data = await response.json();
         if (!response.ok || data.error) {
           throw new Error(data.error || "Cannot start render");
         }
-        pollJob(data.job_id);
+        if (data.result) {
+          showResult(imageAsyncResult, data, false);
+          imageButton.disabled = false;
+        }
       } catch (error) {
-        button.disabled = false;
-        setProgress(0, "ERROR");
-        hint.textContent = "Не удалось запустить рендер.";
-        showError(error.message);
+        imageButton.disabled = false;
+        setProgress(imagePanel, imageBar, imageStatusText, imageHint, 0, "ERROR");
+        imageHint.textContent = "Не удалось запустить рендер.";
+        showError(imageAsyncResult, error.message);
+      }
+    });
+
+    // Video form submit handler
+    videoForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      videoButton.disabled = true;
+      videoAsyncResult.innerHTML = "";
+      videoHint.textContent = "Файл отправлен, начинаю рендер...";
+      setProgress(videoPanel, videoBar, videoStatusText, videoHint, 0, "QUEUE");
+      try {
+        const response = await fetch("/convert-video/start", {
+          method: "POST",
+          body: new FormData(videoForm)
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          throw new Error(data.error || "Cannot start render");
+        }
+        pollJob(data.job_id, videoPanel, videoBar, videoStatusText, videoHint, videoAsyncResult, videoButton, true);
+      } catch (error) {
+        videoButton.disabled = false;
+        setProgress(videoPanel, videoBar, videoStatusText, videoHint, 0, "ERROR");
+        videoHint.textContent = "Не удалось запустить рендер.";
+        showError(videoAsyncResult, error.message);
       }
     });
   </script>
         """
-        result_block = ""
-        if result:
-            escaped_result = html.escape(result)
-            file_url = f"/file?path={quote(result)}"
-            ext = Path(result).suffix.lower()
-            preview = ""
-            if ext in image_exts:
-                preview = f'<img class="preview" src="{file_url}" alt="preview">'
-            elif ext in video_exts:
-                preview = f'<video class="preview" src="{file_url}" controls></video>'
-            result_block = f"""
-                <section class="result ok">
-                    <div class="status">DONE</div>
-                    <a href="{file_url}" target="_blank">{escaped_result}</a>
-                    {preview}
-                </section>
-            """
-        error_block = ""
-        if error:
-            error_block = f"""
-                <section class="result error">
-                    <div class="status">ERROR</div>
-                    <pre>{html.escape(error)}</pre>
-                </section>
-            """
         html_doc = f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -1111,6 +1139,7 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
       </aside>
       </form>
     </section>
+    {image_progress_block}
     <section class="result">
       <div class="status">ВИДЕО</div>
       <form id="video_form" method="post" action="/convert-video" enctype="multipart/form-data">
@@ -1163,9 +1192,7 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
       </aside>
       </form>
     </section>
-    {progress_block}
-    {error_block}
-    {result_block}
+    {video_progress_block}
   </main>
   {script_block}
 </body>
@@ -1331,9 +1358,9 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
                     else:
                         result = process_image(input_path, output_path, output_format=output_format, **kwargs)
                 values["output"] = result
-                self.send_bytes(page(result=result, values=values, mode=requested_mode))
+                self.send_json({"result": result, "values": values})
             except Exception as exc:
-                self.send_bytes(page(error=str(exc), values=values, mode=requested_mode))
+                self.send_json({"error": str(exc)}, status=400)
     server = None
     for candidate in range(port, port + 20):
         try:
