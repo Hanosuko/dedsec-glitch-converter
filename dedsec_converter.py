@@ -17,6 +17,7 @@ Usage:
 Options:
   --input FILE          Input image or video file
   --output FILE         Output file path (auto-generated if not set)
+  --output-format EXT   Output format, for example png, webp, mp4, avi
   --dither METHOD       Dithering: floyd, ordered, atkinson, none (default: floyd)
   --glitch LEVEL        Glitch intensity: 0.0–1.0 (default: 0.5)
   --scanlines           Enable CRT scanline overlay
@@ -45,7 +46,89 @@ import cv2
 
 import numpy as np
 
-from PIL import Image, ImageFilter, ImageDraw
+from PIL import Image, ImageFilter, ImageDraw, ImageOps
+
+IMAGE_INPUT_EXTS = {
+    ".jpg", ".jpeg", ".png", ".bmp", ".dib", ".tif", ".tiff", ".webp",
+    ".jp2", ".j2k", ".pbm", ".pgm", ".ppm", ".pxm", ".pnm", ".sr",
+    ".ras", ".tga", ".gif", ".ico", ".avif",
+}
+
+IMAGE_OUTPUT_EXTS = {
+    ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp",
+    ".jp2", ".ppm", ".pgm", ".pbm", ".tga",
+}
+
+VIDEO_INPUT_EXTS = {
+    ".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v", ".mpg",
+    ".mpeg", ".wmv", ".3gp", ".ts", ".mts", ".m2ts",
+}
+
+VIDEO_OUTPUT_CODECS = {
+    ".mp4": "mp4v",
+    ".m4v": "mp4v",
+    ".mov": "mp4v",
+    ".avi": "XVID",
+    ".mkv": "XVID",
+    ".webm": "VP80",
+}
+
+WEB_IMAGE_ACCEPT = ",".join(sorted(IMAGE_INPUT_EXTS)) + ",image/*"
+WEB_VIDEO_ACCEPT = ",".join(sorted(VIDEO_INPUT_EXTS)) + ",video/*"
+
+def normalize_ext(value: str, allowed: set, default: str) -> str:
+    ext = (value or default).strip().lower()
+    if not ext:
+        ext = default
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    return ext if ext in allowed else default
+
+def read_image_frame(input_path: str) -> np.ndarray:
+    frame = cv2.imread(input_path, cv2.IMREAD_COLOR)
+    if frame is not None:
+        return frame
+    try:
+        with Image.open(input_path) as img:
+            try:
+                img.seek(0)
+            except EOFError:
+                pass
+            img = ImageOps.exif_transpose(img).convert("RGB")
+            return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    except Exception as exc:
+        raise ValueError(f"Cannot read image: {input_path}") from exc
+
+def write_image_frame(output_path: str, frame: np.ndarray) -> None:
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if cv2.imwrite(output_path, frame):
+            return
+    except cv2.error:
+        pass
+    ext = Path(output_path).suffix.lower()
+    pil_format = {
+        ".jpg": "JPEG",
+        ".jpeg": "JPEG",
+        ".png": "PNG",
+        ".bmp": "BMP",
+        ".tif": "TIFF",
+        ".tiff": "TIFF",
+        ".webp": "WEBP",
+        ".tga": "TGA",
+        ".gif": "GIF",
+        ".ico": "ICO",
+    }.get(ext)
+    if not pil_format:
+        raise ValueError(f"Unsupported output image format: {ext or '(no extension)'}")
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    Image.fromarray(rgb).save(output_path, format=pil_format)
+
+def apply_output_format(output_path: str, output_format: str, allowed: set, default: str) -> str:
+    ext = normalize_ext(output_format, allowed, default)
+    if output_path:
+        return str(Path(output_path).with_suffix(ext))
+    return ""
 
 def to_grayscale(img_array: np.ndarray) -> np.ndarray:
     """Convert BGR/RGB numpy array to grayscale."""
@@ -248,6 +331,7 @@ def process_frame(
 def process_image(
     input_path: str,
     output_path: str,
+    output_format: str = "",
     dither_method: str = "floyd",
     glitch: float = 0.5,
     scanlines: bool = True,
@@ -259,9 +343,7 @@ def process_image(
 ) -> str:
     if verbose:
         print(f"\n[DEDSEC] Loading image: {input_path}")
-    frame = cv2.imread(input_path)
-    if frame is None:
-        raise ValueError(f"Cannot read image: {input_path}")
+    frame = read_image_frame(input_path)
     if verbose:
         print(f"[DEDSEC] Applying glitch pipeline (intensity={glitch:.2f}, dither={dither_method})")
     result = process_frame(
@@ -275,8 +357,11 @@ def process_image(
     )
     if not output_path:
         p = Path(input_path)
-        output_path = str(p.parent / f"{p.stem}_dedsec{p.suffix}")
-    cv2.imwrite(output_path, result)
+        suffix = normalize_ext(output_format or p.suffix, IMAGE_OUTPUT_EXTS, ".png")
+        output_path = str(p.parent / f"{p.stem}_dedsec{suffix}")
+    else:
+        output_path = apply_output_format(output_path, output_format, IMAGE_OUTPUT_EXTS, Path(output_path).suffix or ".png")
+    write_image_frame(output_path, result)
     if verbose:
         print(f"[DEDSEC] ✓ Saved: {output_path}")
     return output_path
@@ -284,6 +369,7 @@ def process_image(
 def process_video(
     input_path: str,
     output_path: str,
+    output_format: str = "",
     dither_method: str = "floyd",
     glitch: float = 0.5,
     scanlines: bool = True,
@@ -307,9 +393,17 @@ def process_video(
     fps = target_fps or src_fps
     if not output_path:
         p = Path(input_path)
-        output_path = str(p.parent / f"{p.stem}_dedsec.mp4")
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        suffix = normalize_ext(output_format, set(VIDEO_OUTPUT_CODECS), ".mp4")
+        output_path = str(p.parent / f"{p.stem}_dedsec{suffix}")
+    else:
+        output_path = apply_output_format(output_path, output_format, set(VIDEO_OUTPUT_CODECS), Path(output_path).suffix or ".mp4")
+    codec = VIDEO_OUTPUT_CODECS.get(Path(output_path).suffix.lower(), "mp4v")
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    fourcc = cv2.VideoWriter_fourcc(*codec)
     writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+    if not writer.isOpened():
+        cap.release()
+        raise ValueError(f"Cannot create video writer for {output_path} with codec {codec}")
     if verbose:
         print(f"[DEDSEC] {w}x{h} @ {fps:.1f}fps — {total_frames} frames")
     prev_frame = None
@@ -345,7 +439,7 @@ def process_video(
 
 def run_cli(args):
     ext = Path(args.input).suffix.lower()
-    is_video = ext in {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
+    is_video = ext in VIDEO_INPUT_EXTS
     output = args.output or ""
     kwargs = dict(
         dither_method=args.dither,
@@ -356,9 +450,9 @@ def run_cli(args):
         datamosh=args.datamosh,
     )
     if is_video:
-        process_video(args.input, output, target_fps=args.fps, **kwargs)
+        process_video(args.input, output, output_format=args.output_format, target_fps=args.fps, **kwargs)
     else:
-        process_image(args.input, output, **kwargs)
+        process_image(args.input, output, output_format=args.output_format, **kwargs)
 
 def run_gui():
     import tkinter as tk
@@ -437,9 +531,9 @@ def run_gui():
         f = filedialog.askopenfilename(
             title="Select image or video",
             filetypes=[
-                ("All supported", "*.jpg *.jpeg *.png *.bmp *.tiff *.mp4 *.avi *.mov *.mkv"),
-                ("Images", "*.jpg *.jpeg *.png *.bmp *.tiff"),
-                ("Videos", "*.mp4 *.avi *.mov *.mkv *.webm"),
+                ("All supported", "*.jpg *.jpeg *.png *.bmp *.dib *.tif *.tiff *.webp *.jp2 *.j2k *.pbm *.pgm *.ppm *.pnm *.tga *.gif *.ico *.avif *.mp4 *.avi *.mov *.mkv *.webm *.flv *.m4v *.mpg *.mpeg *.wmv *.3gp *.ts *.mts *.m2ts"),
+                ("Images", "*.jpg *.jpeg *.png *.bmp *.dib *.tif *.tiff *.webp *.jp2 *.j2k *.pbm *.pgm *.ppm *.pnm *.tga *.gif *.ico *.avif"),
+                ("Videos", "*.mp4 *.avi *.mov *.mkv *.webm *.flv *.m4v *.mpg *.mpeg *.wmv *.3gp *.ts *.mts *.m2ts"),
             ],
         )
         if f:
@@ -548,7 +642,7 @@ def run_gui():
     def update_preview(path: str):
         nonlocal preview_img
         ext = Path(path).suffix.lower()
-        if ext in {".mp4", ".avi", ".mov", ".mkv", ".webm"}:
+        if ext in VIDEO_INPUT_EXTS:
             cap = cv2.VideoCapture(path)
             ret, frame = cap.read()
             cap.release()
@@ -584,16 +678,25 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
     uploads_dir = output_dir / "uploads"
     output_dir.mkdir(exist_ok=True)
     uploads_dir.mkdir(exist_ok=True)
-    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-    video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
+    image_exts = IMAGE_INPUT_EXTS | IMAGE_OUTPUT_EXTS
+    video_exts = VIDEO_INPUT_EXTS | set(VIDEO_OUTPUT_CODECS)
     def clamp_glitch(raw: str) -> float:
         try:
             return min(1.0, max(0.0, float(raw)))
         except (TypeError, ValueError):
             return 0.5
-    def default_output_path(input_path: str) -> str:
+    def parse_fps(raw: str):
+        try:
+            value = float(raw)
+            return min(120.0, max(1.0, value)) if value > 0 else None
+        except (TypeError, ValueError):
+            return None
+    def default_output_path(input_path: str, mode: str, output_format: str = "") -> str:
         p = Path(input_path)
-        suffix = ".mp4" if p.suffix.lower() in video_exts else p.suffix
+        if mode == "video":
+            suffix = normalize_ext(output_format, set(VIDEO_OUTPUT_CODECS), ".mp4")
+        else:
+            suffix = normalize_ext(output_format or p.suffix, IMAGE_OUTPUT_EXTS, ".png")
         return str(output_dir / f"{p.stem}_dedsec{suffix}")
     def parse_form(content_type: str, raw: bytes) -> dict:
         if content_type.startswith("multipart/form-data"):
@@ -635,18 +738,56 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
             return fields
         decoded = raw.decode("utf-8", errors="replace")
         return {k: v[-1] for k, v in parse_qs(decoded, keep_blank_values=True).items()}
-    def page(result: str = "", error: str = "", values=None) -> bytes:
+    def page(result: str = "", error: str = "", values=None, mode: str = "image") -> bytes:
         values = values or {}
+        is_video_page = mode == "video"
         input_value = html.escape(values.get("input", ""))
         output_value = html.escape(values.get("output", ""))
         glitch_value = html.escape(values.get("glitch", "0.5"))
         dither_value = values.get("dither", "floyd")
+        output_format_value = values.get("output_format", ".mp4" if is_video_page else ".png")
+        action = "/convert-video" if is_video_page else "/convert"
+        accept_value = html.escape(WEB_VIDEO_ACCEPT if is_video_page else WEB_IMAGE_ACCEPT)
+        upload_title = "VIDEO FILE" if is_video_page else "IMAGE FILE"
+        path_placeholder = "/Users/stepazilin/Desktop/video.mp4" if is_video_page else "/Users/stepazilin/Desktop/photo.jpg"
+        output_placeholder = "auto: dedsec_outputs/video_dedsec.mp4" if is_video_page else "auto: dedsec_outputs/photo_dedsec.png"
+        page_title = "DEDSEC VIDEO CONVERTER" if is_video_page else "DEDSEC IMAGE CONVERTER"
+        page_subtitle = "VIDEO FORMAT // FPS // DITHER // CORRUPT" if is_video_page else "PHOTO FORMAT // DITHER // CORRUPT"
+        video_active = "active" if is_video_page else ""
+        image_active = "" if is_video_page else "active"
         def selected(name: str) -> str:
             return "selected" if dither_value == name else ""
+        def selected_format(name: str) -> str:
+            return "selected" if output_format_value == name else ""
         def checked(name: str, default: bool = True) -> str:
             if name not in values:
                 return "checked" if default else ""
             return "checked" if values.get(name) == "on" else ""
+        if is_video_page:
+            format_options = f"""
+            <option value=".mp4" {selected_format(".mp4")}>MP4</option>
+            <option value=".avi" {selected_format(".avi")}>AVI</option>
+            <option value=".mov" {selected_format(".mov")}>MOV</option>
+            <option value=".mkv" {selected_format(".mkv")}>MKV</option>
+            <option value=".webm" {selected_format(".webm")}>WEBM</option>
+            """
+            fps_field = f"""
+        <div class="field">
+          <label for="fps">OUTPUT FPS</label>
+          <input id="fps" name="fps" type="number" min="1" max="120" step="1" value="{html.escape(values.get("fps", ""))}" placeholder="auto">
+        </div>
+            """
+        else:
+            format_options = f"""
+            <option value=".png" {selected_format(".png")}>PNG</option>
+            <option value=".jpg" {selected_format(".jpg")}>JPG</option>
+            <option value=".webp" {selected_format(".webp")}>WEBP</option>
+            <option value=".tiff" {selected_format(".tiff")}>TIFF</option>
+            <option value=".bmp" {selected_format(".bmp")}>BMP</option>
+            <option value=".tga" {selected_format(".tga")}>TGA</option>
+            <option value=".jp2" {selected_format(".jp2")}>JP2</option>
+            """
+            fps_field = ""
         result_block = ""
         if result:
             escaped_result = html.escape(result)
@@ -714,6 +855,24 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
       letter-spacing: 0;
     }}
     .sub {{ color: var(--green); margin-top: 4px; }}
+    nav {{
+      display: flex;
+      gap: 8px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }}
+    nav a {{
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      text-decoration: none;
+    }}
+    nav a.active {{
+      color: #000;
+      background: var(--green);
+      border-color: var(--green);
+    }}
     form {{
       display: grid;
       grid-template-columns: 1fr 280px;
@@ -731,7 +890,7 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
       font-weight: 700;
       margin: 0 0 8px;
     }}
-    input[type="text"], select {{
+    input[type="text"], input[type="number"], select {{
       width: 100%;
       min-height: 42px;
       background: #050505;
@@ -795,26 +954,37 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
 <body>
   <main>
     <header>
-      <h1>DEDSEC GLITCH ENGINE</h1>
-      <div class="sub">1-BIT // DITHER // CORRUPT</div>
+      <h1>{page_title}</h1>
+      <div class="sub">{page_subtitle}</div>
+      <nav>
+        <a class="{image_active}" href="/">Фото</a>
+        <a class="{video_active}" href="/video">Видео</a>
+      </nav>
     </header>
-    <form method="post" action="/convert" enctype="multipart/form-data">
+    <form method="post" action="{action}" enctype="multipart/form-data">
       <section class="panel">
         <div class="field">
-          <label for="upload">INPUT FILE</label>
-          <input id="upload" name="upload" type="file" accept="image/*,video/*">
+          <label for="upload">{upload_title}</label>
+          <input id="upload" name="upload" type="file" accept="{accept_value}">
         </div>
         <div class="field">
           <label for="input">INPUT FILE PATH</label>
-          <input id="input" name="input" type="text" value="{input_value}" placeholder="/Users/stepazilin/Desktop/photo.jpg">
+          <input id="input" name="input" type="text" value="{input_value}" placeholder="{path_placeholder}">
           <div class="hint">Можно выбрать файл выше или вставить полный путь вручную.</div>
         </div>
         <div class="field">
           <label for="output">OUTPUT FILE PATH</label>
-          <input id="output" name="output" type="text" value="{output_value}" placeholder="auto: dedsec_outputs/...">
+          <input id="output" name="output" type="text" value="{output_value}" placeholder="{output_placeholder}">
+        </div>
+        <div class="field">
+          <label for="output_format">OUTPUT FORMAT</label>
+          <select id="output_format" name="output_format">
+            {format_options}
+          </select>
         </div>
       </section>
       <aside class="panel">
+        {fps_field}
         <div class="field">
           <label for="dither">DITHER</label>
           <select id="dither" name="dither">
@@ -855,7 +1025,10 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
         def do_GET(self):
             parsed = urlparse(self.path)
             if parsed.path == "/":
-                self.send_bytes(page())
+                self.send_bytes(page(mode="image"))
+                return
+            if parsed.path == "/video":
+                self.send_bytes(page(mode="video"))
                 return
             if parsed.path == "/file":
                 params = parse_qs(parsed.query)
@@ -870,14 +1043,17 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
                 return
             self.send_error(404, "Not found")
         def do_POST(self):
-            if urlparse(self.path).path != "/convert":
+            post_path = urlparse(self.path).path
+            if post_path not in {"/convert", "/convert-video"}:
                 self.send_error(404, "Not found")
                 return
+            requested_mode = "video" if post_path == "/convert-video" else "image"
             length = int(self.headers.get("Content-Length", "0"))
             content_type = self.headers.get("Content-Type", "")
             values = parse_form(content_type, self.rfile.read(length))
             input_path = values.get("input", "").strip().strip("'\"")
-            output_path = values.get("output", "").strip().strip("'\"") or default_output_path(input_path)
+            output_format = values.get("output_format", ".mp4" if requested_mode == "video" else ".png")
+            output_path = values.get("output", "").strip().strip("'\"") or default_output_path(input_path, requested_mode, output_format)
             try:
                 if not input_path:
                     raise ValueError("Input file path is empty.")
@@ -893,14 +1069,25 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
                     verbose=False,
                 )
                 ext = Path(input_path).suffix.lower()
-                if ext in video_exts:
-                    result = process_video(input_path, output_path, **kwargs)
+                if requested_mode == "video":
+                    if ext not in VIDEO_INPUT_EXTS:
+                        raise ValueError(f"Unsupported video input format: {ext or '(no extension)'}")
+                    result = process_video(
+                        input_path,
+                        output_path,
+                        output_format=output_format,
+                        target_fps=parse_fps(values.get("fps", "")),
+                        **kwargs,
+                    )
                 else:
-                    result = process_image(input_path, output_path, **kwargs)
+                    if ext in VIDEO_INPUT_EXTS:
+                        raise ValueError("Для видео открой страницу /video.")
+                    else:
+                        result = process_image(input_path, output_path, output_format=output_format, **kwargs)
                 values["output"] = result
-                self.send_bytes(page(result=result, values=values))
+                self.send_bytes(page(result=result, values=values, mode=requested_mode))
             except Exception as exc:
-                self.send_bytes(page(error=str(exc), values=values))
+                self.send_bytes(page(error=str(exc), values=values, mode=requested_mode))
     server = None
     for candidate in range(port, port + 20):
         try:
@@ -930,6 +1117,7 @@ def main():
     )
     parser.add_argument("--input",      "-i", help="Input image or video file")
     parser.add_argument("--output",     "-o", help="Output file path", default="")
+    parser.add_argument("--output-format", help="Output format, for example png, webp, mp4, avi", default="")
     parser.add_argument("--dither",     "-d", choices=["floyd","ordered","atkinson","none"],
                         default="floyd", help="Dithering algorithm")
     parser.add_argument("--glitch",     "-g", type=float, default=0.5,
@@ -954,4 +1142,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
