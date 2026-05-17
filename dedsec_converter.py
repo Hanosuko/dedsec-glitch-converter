@@ -744,21 +744,14 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
         return {k: v[-1] for k, v in parse_qs(decoded, keep_blank_values=True).items()}
     def page(result: str = "", error: str = "", values=None, mode: str = "image") -> bytes:
         values = values or {}
-        is_video_page = mode == "video"
+        is_video_page = False
         input_value = html.escape(values.get("input", ""))
         output_value = html.escape(values.get("output", ""))
         glitch_value = html.escape(values.get("glitch", "0.5"))
         dither_value = values.get("dither", "floyd")
-        output_format_value = values.get("output_format", ".mp4" if is_video_page else ".png")
-        action = "/convert-video" if is_video_page else "/convert"
-        accept_value = html.escape(WEB_VIDEO_ACCEPT if is_video_page else WEB_IMAGE_ACCEPT)
-        upload_title = "VIDEO FILE" if is_video_page else "IMAGE FILE"
-        path_placeholder = "/Users/stepazilin/Desktop/video.mp4" if is_video_page else "/Users/stepazilin/Desktop/photo.jpg"
-        output_placeholder = "auto: dedsec_outputs/video_dedsec.mp4" if is_video_page else "auto: dedsec_outputs/photo_dedsec.png"
-        page_title = "DEDSEC VIDEO CONVERTER" if is_video_page else "DEDSEC IMAGE CONVERTER"
-        page_subtitle = "VIDEO FORMAT // FPS // DITHER // CORRUPT" if is_video_page else "PHOTO FORMAT // DITHER // CORRUPT"
-        video_active = "active" if is_video_page else ""
-        image_active = "" if is_video_page else "active"
+        output_format_value = values.get("output_format", ".png")
+        page_title = "DEDSEC GLITCH CONVERTER"
+        page_subtitle = "PHOTO // VIDEO // ONE LOCALHOST"
         def selected(name: str) -> str:
             return "selected" if dither_value == name else ""
         def selected_format(name: str) -> str:
@@ -792,26 +785,32 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
             <option value=".jp2" {selected_format(".jp2")}>JP2</option>
             """
             fps_field = ""
-        progress_block = ""
-        script_block = ""
-        if is_video_page:
-            progress_block = """
+        video_accept_value = html.escape(WEB_VIDEO_ACCEPT)
+        image_accept_value = html.escape(WEB_IMAGE_ACCEPT)
+        video_format_options = """
+            <option value=".mp4" selected>MP4</option>
+            <option value=".avi">AVI</option>
+            <option value=".mov">MOV</option>
+            <option value=".mkv">MKV</option>
+            <option value=".webm">WEBM</option>
+        """
+        progress_block = """
     <section id="render_progress" class="result progress-panel" hidden>
       <div class="status" id="render_status">RENDER 0%</div>
       <progress id="render_bar" value="0" max="100"></progress>
       <div class="hint" id="render_hint">Идет обработка видео...</div>
     </section>
     <section id="async_result"></section>
-            """
-            script_block = """
+        """
+        script_block = """
   <script>
-    const form = document.querySelector("form");
+    const form = document.getElementById("video_form");
     const panel = document.getElementById("render_progress");
     const bar = document.getElementById("render_bar");
     const statusText = document.getElementById("render_status");
     const hint = document.getElementById("render_hint");
     const asyncResult = document.getElementById("async_result");
-    const button = document.querySelector("button[type=submit]");
+    const button = form.querySelector("button[type=submit]");
 
     function setProgress(value, status) {
       const pct = Math.max(0, Math.min(100, Number(value) || 0));
@@ -884,7 +883,7 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
       }
     });
   </script>
-            """
+        """
         result_block = ""
         if result:
             escaped_result = html.escape(result)
@@ -1062,29 +1061,27 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
     <header>
       <h1>{page_title}</h1>
       <div class="sub">{page_subtitle}</div>
-      <nav>
-        <a class="{image_active}" href="/">Фото</a>
-        <a class="{video_active}" href="/video">Видео</a>
-      </nav>
     </header>
-    <form method="post" action="{action}" enctype="multipart/form-data">
+    <section class="result">
+      <div class="status">ФОТО</div>
+      <form id="image_form" method="post" action="/convert" enctype="multipart/form-data">
       <section class="panel">
         <div class="field">
-          <label for="upload">{upload_title}</label>
-          <input id="upload" name="upload" type="file" accept="{accept_value}">
+          <label for="image_upload">IMAGE FILE</label>
+          <input id="image_upload" name="upload" type="file" accept="{image_accept_value}">
         </div>
         <div class="field">
-          <label for="input">INPUT FILE PATH</label>
-          <input id="input" name="input" type="text" value="{input_value}" placeholder="{path_placeholder}">
+          <label for="image_input">INPUT FILE PATH</label>
+          <input id="image_input" name="input" type="text" value="{input_value}" placeholder="/Users/stepazilin/Desktop/photo.jpg">
           <div class="hint">Можно выбрать файл выше или вставить полный путь вручную.</div>
         </div>
         <div class="field">
-          <label for="output">OUTPUT FILE PATH</label>
-          <input id="output" name="output" type="text" value="{output_value}" placeholder="{output_placeholder}">
+          <label for="image_output">OUTPUT FILE PATH</label>
+          <input id="image_output" name="output" type="text" value="{output_value}" placeholder="auto: dedsec_outputs/photo_dedsec.png">
         </div>
         <div class="field">
-          <label for="output_format">OUTPUT FORMAT</label>
-          <select id="output_format" name="output_format">
+          <label for="image_output_format">OUTPUT FORMAT</label>
+          <select id="image_output_format" name="output_format">
             {format_options}
           </select>
         </div>
@@ -1112,7 +1109,60 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
         </div>
         <button type="submit">EXECUTE CONVERSION</button>
       </aside>
-    </form>
+      </form>
+    </section>
+    <section class="result">
+      <div class="status">ВИДЕО</div>
+      <form id="video_form" method="post" action="/convert-video" enctype="multipart/form-data">
+      <section class="panel">
+        <div class="field">
+          <label for="video_upload">VIDEO FILE</label>
+          <input id="video_upload" name="upload" type="file" accept="{video_accept_value}">
+        </div>
+        <div class="field">
+          <label for="video_input">INPUT FILE PATH</label>
+          <input id="video_input" name="input" type="text" placeholder="/Users/stepazilin/Desktop/video.mp4">
+          <div class="hint">Видео рендерится на этой же странице, шкала ниже покажет прогресс.</div>
+        </div>
+        <div class="field">
+          <label for="video_output">OUTPUT FILE PATH</label>
+          <input id="video_output" name="output" type="text" placeholder="auto: dedsec_outputs/video_dedsec.mp4">
+        </div>
+        <div class="field">
+          <label for="video_output_format">OUTPUT FORMAT</label>
+          <select id="video_output_format" name="output_format">
+            {video_format_options}
+          </select>
+        </div>
+      </section>
+      <aside class="panel">
+        <div class="field">
+          <label for="video_fps">OUTPUT FPS</label>
+          <input id="video_fps" name="fps" type="number" min="1" max="120" step="1" placeholder="auto">
+        </div>
+        <div class="field">
+          <label for="video_dither">DITHER</label>
+          <select id="video_dither" name="dither">
+            <option value="floyd" selected>Floyd-Steinberg</option>
+            <option value="ordered">Bayer Ordered</option>
+            <option value="atkinson">Atkinson</option>
+            <option value="none">Hard Threshold</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="video_glitch">GLITCH INTENSITY</label>
+          <input id="video_glitch" name="glitch" type="range" min="0" max="1" step="0.05" value="0.5">
+        </div>
+        <div class="toggles">
+          <label><input type="checkbox" name="scanlines" checked> CRT Scanlines</label>
+          <label><input type="checkbox" name="vhs" checked> VHS Noise</label>
+          <label><input type="checkbox" name="dispersion" checked> Pixel Dispersion</label>
+          <label><input type="checkbox" name="datamosh"> Datamosh</label>
+        </div>
+        <button type="submit">EXECUTE VIDEO RENDER</button>
+      </aside>
+      </form>
+    </section>
     {progress_block}
     {error_block}
     {result_block}
@@ -1197,7 +1247,9 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
                 self.send_bytes(page(mode="image"))
                 return
             if parsed.path == "/video":
-                self.send_bytes(page(mode="video"))
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.end_headers()
                 return
             if parsed.path == "/progress":
                 params = parse_qs(parsed.query)
@@ -1275,7 +1327,7 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
                     )
                 else:
                     if ext in VIDEO_INPUT_EXTS:
-                        raise ValueError("Для видео открой страницу /video.")
+                        raise ValueError("Для видео используй блок ВИДЕО на этой же странице.")
                     else:
                         result = process_image(input_path, output_path, output_format=output_format, **kwargs)
                 values["output"] = result
