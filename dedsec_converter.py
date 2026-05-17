@@ -671,8 +671,10 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, quote, unquote, urlparse
     import html
+    import json
     import mimetypes
     import re
+    import uuid
     import webbrowser
     output_dir = Path.cwd() / "dedsec_outputs"
     uploads_dir = output_dir / "uploads"
@@ -680,6 +682,8 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
     uploads_dir.mkdir(exist_ok=True)
     image_exts = IMAGE_INPUT_EXTS | IMAGE_OUTPUT_EXTS
     video_exts = VIDEO_INPUT_EXTS | set(VIDEO_OUTPUT_CODECS)
+    jobs = {}
+    jobs_lock = threading.Lock()
     def clamp_glitch(raw: str) -> float:
         try:
             return min(1.0, max(0.0, float(raw)))
@@ -788,6 +792,99 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
             <option value=".jp2" {selected_format(".jp2")}>JP2</option>
             """
             fps_field = ""
+        progress_block = ""
+        script_block = ""
+        if is_video_page:
+            progress_block = """
+    <section id="render_progress" class="result progress-panel" hidden>
+      <div class="status" id="render_status">RENDER 0%</div>
+      <progress id="render_bar" value="0" max="100"></progress>
+      <div class="hint" id="render_hint">Идет обработка видео...</div>
+    </section>
+    <section id="async_result"></section>
+            """
+            script_block = """
+  <script>
+    const form = document.querySelector("form");
+    const panel = document.getElementById("render_progress");
+    const bar = document.getElementById("render_bar");
+    const statusText = document.getElementById("render_status");
+    const hint = document.getElementById("render_hint");
+    const asyncResult = document.getElementById("async_result");
+    const button = document.querySelector("button[type=submit]");
+
+    function setProgress(value, status) {
+      const pct = Math.max(0, Math.min(100, Number(value) || 0));
+      panel.hidden = false;
+      bar.value = pct;
+      statusText.textContent = `${status || "RENDER"} ${pct.toFixed(1)}%`;
+    }
+
+    function showResult(data) {
+      const url = `/file?path=${encodeURIComponent(data.result)}`;
+      asyncResult.innerHTML = `
+        <section class="result ok">
+          <div class="status">DONE</div>
+          <a href="${url}" target="_blank">${data.result}</a>
+          <video class="preview" src="${url}" controls></video>
+        </section>
+      `;
+    }
+
+    function showError(message) {
+      asyncResult.innerHTML = `
+        <section class="result error">
+          <div class="status">ERROR</div>
+          <pre>${message}</pre>
+        </section>
+      `;
+    }
+
+    async function pollJob(id) {
+      const response = await fetch(`/progress?id=${encodeURIComponent(id)}`);
+      const data = await response.json();
+      setProgress(data.progress, data.status);
+      if (data.status === "done") {
+        setProgress(100, "DONE");
+        hint.textContent = "Рендер завершен.";
+        button.disabled = false;
+        showResult(data);
+        return;
+      }
+      if (data.status === "error") {
+        hint.textContent = "Рендер остановлен.";
+        button.disabled = false;
+        showError(data.error || "Unknown error");
+        return;
+      }
+      setTimeout(() => pollJob(id), 500);
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      asyncResult.innerHTML = "";
+      hint.textContent = "Файл отправлен, начинаю рендер...";
+      setProgress(0, "QUEUE");
+      try {
+        const response = await fetch("/convert-video/start", {
+          method: "POST",
+          body: new FormData(form)
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          throw new Error(data.error || "Cannot start render");
+        }
+        pollJob(data.job_id);
+      } catch (error) {
+        button.disabled = false;
+        setProgress(0, "ERROR");
+        hint.textContent = "Не удалось запустить рендер.";
+        showError(error.message);
+      }
+    });
+  </script>
+            """
         result_block = ""
         if result:
             escaped_result = html.escape(result)
@@ -935,6 +1032,15 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
     }}
     .result a {{ color: var(--green); overflow-wrap: anywhere; }}
     .status {{ color: var(--red); font-weight: 700; margin-bottom: 8px; }}
+    progress {{
+      width: 100%;
+      height: 16px;
+      accent-color: var(--green);
+    }}
+    button:disabled {{
+      opacity: 0.55;
+      cursor: wait;
+    }}
     pre {{ white-space: pre-wrap; color: #ff7a92; margin: 0; }}
     .preview {{
       display: block;
@@ -1007,12 +1113,68 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
         <button type="submit">EXECUTE CONVERSION</button>
       </aside>
     </form>
+    {progress_block}
     {error_block}
     {result_block}
   </main>
+  {script_block}
 </body>
 </html>"""
         return html_doc.encode("utf-8")
+    def start_video_job(values: dict) -> str:
+        input_path = values.get("input", "").strip().strip("'\"")
+        output_format = values.get("output_format", ".mp4")
+        output_path = values.get("output", "").strip().strip("'\"") or default_output_path(input_path, "video", output_format)
+        if not input_path:
+            raise ValueError("Input file path is empty.")
+        if not Path(input_path).exists():
+            raise ValueError(f"Input file does not exist: {input_path}")
+        ext = Path(input_path).suffix.lower()
+        if ext not in VIDEO_INPUT_EXTS:
+            raise ValueError(f"Unsupported video input format: {ext or '(no extension)'}")
+        job_id = uuid.uuid4().hex
+        job_values = dict(values)
+        job_values["output"] = output_path
+        with jobs_lock:
+            jobs[job_id] = {
+                "status": "queued",
+                "progress": 0.0,
+                "result": "",
+                "error": "",
+                "values": job_values,
+            }
+        kwargs = dict(
+            dither_method=values.get("dither", "floyd"),
+            glitch=clamp_glitch(values.get("glitch", "0.5")),
+            scanlines=values.get("scanlines") == "on",
+            vhs=values.get("vhs") == "on",
+            dispersion=values.get("dispersion") == "on",
+            datamosh=values.get("datamosh") == "on",
+            verbose=False,
+        )
+        def update(**changes):
+            with jobs_lock:
+                if job_id in jobs:
+                    jobs[job_id].update(changes)
+        def run():
+            try:
+                update(status="rendering", progress=0.0)
+                def cb(pct):
+                    update(status="rendering", progress=round(float(pct), 2))
+                result = process_video(
+                    input_path,
+                    output_path,
+                    output_format=output_format,
+                    target_fps=parse_fps(values.get("fps", "")),
+                    progress_cb=cb,
+                    **kwargs,
+                )
+                job_values["output"] = result
+                update(status="done", progress=100.0, result=result, values=job_values)
+            except Exception as exc:
+                update(status="error", error=str(exc))
+        threading.Thread(target=run, daemon=True).start()
+        return job_id
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             return
@@ -1022,6 +1184,13 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+        def send_json(self, data: dict, status: int = 200):
+            payload = json.dumps(data).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
         def do_GET(self):
             parsed = urlparse(self.path)
             if parsed.path == "/":
@@ -1029,6 +1198,21 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
                 return
             if parsed.path == "/video":
                 self.send_bytes(page(mode="video"))
+                return
+            if parsed.path == "/progress":
+                params = parse_qs(parsed.query)
+                job_id = params.get("id", [""])[0]
+                with jobs_lock:
+                    job = dict(jobs.get(job_id, {}))
+                if not job:
+                    self.send_json({"status": "error", "progress": 0, "error": "Job not found"}, status=404)
+                    return
+                self.send_json({
+                    "status": job.get("status", "queued"),
+                    "progress": job.get("progress", 0),
+                    "result": job.get("result", ""),
+                    "error": job.get("error", ""),
+                })
                 return
             if parsed.path == "/file":
                 params = parse_qs(parsed.query)
@@ -1044,6 +1228,16 @@ def run_web_gui(host: str = "127.0.0.1", port: int = 8765):
             self.send_error(404, "Not found")
         def do_POST(self):
             post_path = urlparse(self.path).path
+            if post_path == "/convert-video/start":
+                length = int(self.headers.get("Content-Length", "0"))
+                content_type = self.headers.get("Content-Type", "")
+                values = parse_form(content_type, self.rfile.read(length))
+                try:
+                    job_id = start_video_job(values)
+                    self.send_json({"job_id": job_id})
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, status=400)
+                return
             if post_path not in {"/convert", "/convert-video"}:
                 self.send_error(404, "Not found")
                 return

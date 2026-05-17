@@ -8,6 +8,7 @@ DEDSEC Glitch Converter — локальный конвертер изображ
 - Конвертирует видео: MP4, AVI, MOV, MKV, WEBM, FLV, M4V, MPG, MPEG, WMV, 3GP, TS, MTS, M2TS.
 - Сохраняет фото в PNG, JPG, WEBP, TIFF, BMP, TGA, JP2 и PNM-форматах.
 - Сохраняет видео в MP4, AVI, MOV, MKV и WEBM.
+- Показывает шкалу прогресса во время рендера видео на странице `/video`.
 - Поддерживает дизеринг Floyd-Steinberg, Bayer Ordered, Atkinson и жесткий threshold.
 - Добавляет glitch-смещения, CRT scanlines, VHS noise, pixel dispersion и datamosh.
 - Запускает локальный web-интерфейс на `http://127.0.0.1:8765` для фото и отдельную страницу `http://127.0.0.1:8765/video` для видео.
